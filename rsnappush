@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+
+"""
+rsnappush: Perform file-based incremental rsync push backup with hard-links
+
+Author: Frank Tobin
+Email: ftobin@neverending.org
+Author URL: https://www.neverending.org/
+License: Mozilla Public License 2.0 (https://opensource.org/licenses/MPL-2.0)
+"""
+
+import os
+import re
+import sys
+import lzma
+import time
+import argparse
+import subprocess
+import tempfile
+import shutil
+
+parser = argparse.ArgumentParser(description="Perform file-based incremental rsync push backup with hard-links")
+
+parser.add_argument("source", metavar="SOURCE_PATH", help="directory to backup")
+parser.add_argument("dest", metavar="[ACCOUNT:]DEST_PATH", help="Where to store the backups.  ACCOUNT can be anything ssh will accept.  Example: user@host:backups/")
+
+parser.add_argument("-r", "--rsync-opt", action="append", default=[],
+                    help="pass-thru options to rsync.  Use '=' syntax, and include prefixing dashes. Example: --rsync-opt=--partial-dir=/home/user/rsync-partial")
+parser.add_argument("-q", "--quiet", action="store_true", default=False,
+                    help="emit less output")
+
+backup_prefix = "backup-"
+compare_n_backups = 20
+
+args = parser.parse_args()
+
+match = re.search("(.+)?:(.*)", args.dest)
+
+if match:
+    dest_account = match.group(1)
+    dest_path = match.group(2)
+else:
+    dest_account = None
+    dest_path = args.dest
+
+def ssh_prefix(cmd):
+    if dest_account:
+        cmd = ['ssh', dest_account] + cmd
+    return cmd
+
+def rsync_quietness(cmd):
+    if args.quiet:
+        cmd.append("--quiet")
+    else:
+        cmd.extend(["-v", "--progress"])
+    return cmd
+
+mkdir_cmd = ssh_prefix(["mkdir", "-p", dest_path])
+subprocess.run(mkdir_cmd, check=True)
+
+# check what backups already exist
+check_backups_cmd = ssh_prefix(["ls", f"{dest_path}/"])
+
+proc = subprocess.run(check_backups_cmd,
+                      stdout=subprocess.PIPE, encoding="utf-8", check=True)
+link_dests = proc.stdout.splitlines()
+link_dests = list(filter(lambda x: re.search(backup_prefix, x), link_dests))
+link_dests = link_dests[-compare_n_backups:]
+link_dest_args = list(map(lambda x: f"--link-dest=../{x}", link_dests))
+
+timestamp_str = time.strftime('%Y%m%d-%H%M')
+my_dest = time.strftime(f'{backup_prefix}{timestamp_str}')
+
+cmd = ["rsync", "--human-readable", "-a", "--hard-links",
+       "--delete", "--compress-level", "9",
+       "-e", "ssh"
+]
+
+
+cmd = rsync_quietness(cmd)
+cmd.extend(args.rsync_opt)
+cmd.extend(link_dest_args)
+
+cmd.extend([os.path.normpath(f"{args.source}") + "/", # just look inside the directory
+            os.path.join(args.dest, my_dest)])
+
+if not args.quiet:
+    print(*cmd)
+subprocess.run(cmd, check=False) # don't let permissions problems get in the way
+
+with tempfile.NamedTemporaryFile(prefix="rsnappush-perms.") as permissions_file:
+    compressed_perms_file = lzma.open(permissions_file.name, mode="w")
+    
+    get_perms_cmd = ["getfacl", "-R", "--absolute-names", args.source]
+
+    with subprocess.Popen(get_perms_cmd, stdout=subprocess.PIPE) as proc:
+        shutil.copyfileobj(proc.stdout, compressed_perms_file)
+
+    compressed_perms_file.close()
+
+    mkdir_cmd = ssh_prefix(["mkdir", "-p", os.path.join(dest_path, "permissions")])
+    subprocess.run(mkdir_cmd)
+    perms_rsync = ["rsync", "--human-readable", "-a", "-e", "ssh"]
+    perms_rsync = rsync_quietness(perms_rsync)
+    perms_rsync.extend(args.rsync_opt)
+
+    perms_rsync.extend([permissions_file.name,
+                        os.path.join(args.dest, 'permissions', f'permissions-{timestamp_str}.xz')])
+    if not args.quiet:
+        print(*perms_rsync)
+    subprocess.run(perms_rsync, check=True)
