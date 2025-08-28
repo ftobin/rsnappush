@@ -42,7 +42,7 @@ class my_install(setuptools.command.install.install):
 setuptools.setup(name='rsnappush',
                  version = '1.1',
                  packages = setuptools.find_packages(),
-                 url = "https://osdn.net/users/ftobin/pf/rsnappush/",
+                 url = "https://github.com/ftobin/rsnappush",
                  license = "MPL-2.0",
                  author = "Frank Tobin",
                  author_email = "ftobin@neverending.org",
